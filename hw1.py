@@ -63,7 +63,66 @@ def build_chain() -> Any:
     ``deepseek-v4-flash-vision-exp``. The API key is loaded from .env.
     """
     ### YOUR CODE HERE
-    return None
+    from langchain_core.prompts import ChatPromptTemplate
+    from langchain_deepseek import ChatDeepSeek
+    from langchain_core.output_parsers import StrOutputParser, JsonOutputParser
+    import os
+
+    DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
+    if not DEEPSEEK_API_KEY:
+        raise ValueError("DEEPSEEK_API_KEY f**ked, check .env")
+
+    llm = ChatDeepSeek(
+        model = "deepseek-v4-flash-vision-exp",
+        api_key = DEEPSEEK_API_KEY,
+        
+    )
+
+    # prompt_extract = ChatPromptTemplate.from_messages(
+    #     """
+    #     You are a receipt recognition assitant. Extract:
+    #     - Name and price of goods of each row (discount is recorded as negative number)
+    #     - The total payment
+    #     - The total amount of discount
+
+    #     from the picture {picture_input}.
+        
+    #     Return ONLY a JSON object in the following format:
+    #     {
+    #     "items": [{"name": string, "amount": number}, ...],
+    #     "total_payment": number,
+    #     "total_discount": number
+    #     }
+    #     Do not compute anything. Only extract what you see.
+    #     """
+    # )
+    prompt_extract = ChatPromptTemplate.from_messages([
+        ("system", "You are a receipt recognition assistant. Only extract and recognize payments and discounts, never compute."),
+        ("human", [
+            {"type": "text", "text": """Extract from this receipt image:
+    - each item's name (discount also as item)
+    - each item's price (discount as negative number)
+        When reading price, only check the right column, ignore other information from the row because they are probably blurred.
+    - the total payment printed on the receipt
+    - items after "ROUNDING" should be ignored ("ROUNDING" should be included)
+
+    STRICT RULES:
+    1. ONLY extract text that is actually visible on the image.
+    2. DO NOT invent, guess, or infer any numbers or item names.
+    3. If a line is unreadable, skip it. Do not make up a value.
+    4. Return ONLY a JSON object:
+    {{
+    "items": [{{"name": "...", "amount": 0.0}}, ...],
+    "total_payment": 0.0,
+    }}
+    Do not compute anything. Only extract what you see."""},
+            {"type": "image_url", "image_url": {"url": "{picture_input}"}},
+        ]),
+    ])
+
+    chain_extract = prompt_extract | llm | JsonOutputParser()
+
+    return chain_extract
 
 
 def answer_queries(chain: Any, images: list[Path]) -> dict[str, Any]:
@@ -79,8 +138,53 @@ def answer_queries(chain: Any, images: list[Path]) -> dict[str, Any]:
     to process independent receipt-extraction prompts in parallel.
     """
     ### YOUR CODE HERE
+    from decimal import Decimal     # avoid float number error
     _ = (chain, images)
-    return {QUERY_1: DUMMY_RESPONSE, QUERY_2: DUMMY_RESPONSE}
+
+    receipt_json = []
+    for p in _[1]:
+        json = _[0].invoke({"picture_input": image_data_url(p)})
+        receipt_json.append(json)
+
+    query1 = Decimal()
+    query2 = Decimal()
+    for i, r in enumerate(receipt_json):
+        if not isinstance(r, dict):     # validate
+            # print()
+            continue
+        try:
+            payment = Decimal(str(r.get("total_payment", 0)))         # 0 is protective
+            # discount = Decimal(str(r.get("total_discount", 0)))
+        except Exception:   continue
+
+        # # sum abs all
+        # print("receipt", i+1)
+        # for item in r.get("items"):
+        #     query2 += abs(Decimal(str(item["amount"])))
+
+        #     # check discount
+        #     if item["amount"] <=0:
+        #         print(f"{item['name']} : {item['amount']}")
+
+        
+        ## sum all negative
+        # print("receipt", i+1)         # self check
+        discount = Decimal()
+        for item in r.get("items"):
+
+            if item["amount"] < 0:
+                discount += Decimal(str(item["amount"]))
+                # print(item.values())      # self check
+
+
+        query1 += payment
+        query2 += payment - discount
+
+        # self validation
+        # print(f"receipt{i+1}, paid:{payment}, disc:{discount}, pay_ori:{payment - discount}")
+        # print(f"receipt{i+1}, paid:{payment}, ")
+
+    return {QUERY_1: f"HK${query1:.2f}", QUERY_2: f"HK${query2:.2f}"}
 
 
 # Everything below is provided runner/scoring code. No edits are needed.
